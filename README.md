@@ -1,118 +1,100 @@
-# Inflight AI Bot
+# Hermes
 
-A personal Telegram bot designed for use on airplane inflight WiFi (Lufthansa, Swiss, etc. offer free Telegram). Send natural language messages or slash commands, get concise answers back — optimized for small screens and limited bandwidth.
+**A personal, single-user Telegram AI bot you self-host.** Text it questions. It replies with web search results, stock quotes, weather, PDF summaries, news, translations — all through normal Telegram messages. Runs on a Raspberry Pi at home or cheap cloud hosting.
+
+One strong use case: **reliable answers on airplane WiFi without paying for internet.** Most airlines offer free Telegram messaging — Hermes turns that into a full AI assistant.
+
+> *"I was tired of paying for inflight WiFi just to Google things. So I built an AI that answers through Telegram's free tier."*
+
+---
 
 ## What it does
 
-- **Natural language queries** — web search via Gemini (Google Search built-in) or Claude
-- **PDF fetch + summarize** — paste a PDF URL, get 3–5 key points
-- **Weather, stocks, news, flight status, translation** via slash commands
-- **Conversation memory** — 12-turn context per chat, cleared with `/clear`
-- **Single-user** — locked to your Telegram user ID; everyone else gets rejected
+- **Ask anything** — web search powered by Gemini (Google Search built-in), Claude as fallback
+- **Fetch + summarize PDFs** — paste a URL, get key points back
+- **Slash commands** — weather, stocks, news, flight status, wiki, translation
+- **Conversation memory** — 12-turn context per chat
+- **Owner-locked** — only your Telegram user ID can use it; everyone else gets rejected
+- **Tiny footprint** — runs on a Raspberry Pi, costs ~$0.02/day in API calls
 
-## Commands
+### Commands
 
 ```
-/weather <city>         current weather (wttr.in, free, no key)
-/flight <LH441>         live flight status via web search
+/weather <city>         current weather
+/flight <LH441>         live flight status
 /news [topic]           top 5 headlines
 /pdf <url or name>      fetch and summarize a PDF
-/wiki <topic>           Grokipedia-style encyclopedia summary via Grok
-/stocks <AAPL TSLA>     live stock quotes (yfinance, free, no key)
+/wiki <topic>           encyclopedia summary (powered by Grok)
+/stocks <AAPL TSLA>     live stock quotes
 /tr <lang> <text>       translate
-/clear                  reset conversation context
+/clear                  reset conversation
 /help                   command list
-```
-
-## Architecture
-
-```
-Telegram app (phone)
-  → Telegram servers          (inflight WiFi carries this leg)
-  → POST /webhook (FastAPI)   (secret token validated)
-  → handle_message()          (user ID guard)
-  → run_agent()               (routing logic)
-       ├─ URL/site/PDF queries → Claude (web_search + fetch_url + fetch_pdf)
-       └─ everything else     → Gemini (google_search built-in)
-                                  └─ 4xx/quota → fallback to Claude
-  → reply via Bot API
-```
-
-**Key constraint**: Gemini's API does not allow mixing `google_search` with custom function declarations in the same request. This is why routing is split — Gemini handles general queries with its built-in search, Claude handles anything requiring URL or PDF fetching.
-
-## Stack
-
-| Component | Purpose | Cost |
-|---|---|---|
-| [python-telegram-bot 22.x](https://github.com/python-telegram-bot/python-telegram-bot) | Telegram webhook handling | Free |
-| [FastAPI](https://fastapi.tiangolo.com) + uvicorn | Webhook server | Free |
-| [Google Gemini](https://aistudio.google.com) | Primary AI — built-in Google Search | Free tier |
-| [Anthropic Claude](https://console.anthropic.com) | Fallback + PDF/URL fetching | Pay-per-use |
-| [xAI Grok](https://console.x.ai) | /wiki encyclopedia summaries | Pay-per-use |
-| [yfinance](https://github.com/ranaroussi/yfinance) | Stock quotes | Free |
-| [wttr.in](https://wttr.in) | Weather | Free |
-| [PyMuPDF](https://pymupdf.readthedocs.io) | PDF text extraction | Free |
-
-## Setup
-
-### 1. Create a Telegram bot
-
-1. Message [@BotFather](https://t.me/botfather) → `/newbot` → follow prompts → save the token
-2. Message [@userinfobot](https://t.me/userinfobot) → note your numeric user ID
-
-### 2. Get API keys
-
-| Key | Where |
-|---|---|
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
-| `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API key |
-| `XAI_API_KEY` | [console.x.ai](https://console.x.ai) |
-
-### 3. Configure
-
-```bash
-cp .env.example .env
-# Edit .env — fill in all values
-# Generate a webhook secret:
-python -c "import secrets; print(secrets.token_hex(32))"
-```
-
-### 4. Install and run
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 ---
 
-## Deployment options
-
-### Option A — Local machine + ngrok (development / testing)
-
-Fastest way to get running. Free ngrok account gives you a stable domain that survives restarts.
+## Quick start
 
 ```bash
-# Install ngrok: https://ngrok.com/download
-ngrok config add-authtoken <your-token>
-ngrok http 8000
-# Copy the https URL → set as WEBHOOK_BASE_URL in .env (no trailing slash)
-uvicorn main:app --reload
+git clone https://github.com/eloquentix/hermes.git
+cd hermes
+cp .env.example .env        # fill in your keys (see below)
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-### Option B — Raspberry Pi (always-on, home network)
+You need a public HTTPS URL for Telegram's webhook. For local dev, use [ngrok](https://ngrok.com): `ngrok http 8000`, then set `WEBHOOK_BASE_URL` in `.env`.
 
-Run on any Pi (tested on Pi 4/5). Expose via a free dynamic DNS service.
+### What you need
 
-**DuckDNS setup** (free, `your-name.duckdns.org`):
+**1. Telegram bot** — message [@BotFather](https://t.me/botfather) → `/newbot` → save the token. Get your user ID from [@userinfobot](https://t.me/userinfobot).
+
+**2. API keys:**
+
+| Key | Where | Cost |
+|---|---|---|
+| `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) | Free tier |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) | Pay-per-use |
+| `XAI_API_KEY` | [console.x.ai](https://console.x.ai) | Pay-per-use |
+
+**3. Webhook secret** — generate one: `python -c "import secrets; print(secrets.token_hex(32))"`
+
+---
+
+## How it works
+
+```
+You (Telegram app)
+  → Telegram servers
+  → POST /webhook (FastAPI)        webhook secret validated
+  → handle_message()               user ID guard
+  → run_agent()                    smart routing:
+       ├─ URL/PDF queries  → Claude   (web_search + fetch_url + fetch_pdf)
+       └─ everything else  → Gemini   (google_search built-in, free)
+                               └─ on 4xx/quota → fallback to Claude
+  → reply via Bot API
+  → You
+```
+
+**Why two models?** Gemini's API doesn't allow mixing its built-in `google_search` with custom function declarations. So Gemini handles general queries (free, fast, has Google Search), and Claude handles anything that needs URL fetching or PDF extraction. Automatic fallback if Gemini hits rate limits.
+
+Responses are capped at 280 characters by default — optimized for quick reads on small screens.
+
+---
+
+## Deploy it
+
+### Raspberry Pi (recommended for always-on)
+
+Tested on Pi 4/5. Use DuckDNS (free) for a public domain, nginx for TLS, systemd for auto-restart.
+
+**DuckDNS** — free dynamic DNS:
 ```bash
-# On the Pi — update IP every 5 minutes
 echo "*/5 * * * * curl -s 'https://www.duckdns.org/update?domains=YOUR_DOMAIN&token=YOUR_TOKEN&ip=' > /dev/null" | crontab -
 ```
 
-**nginx on port 8443** (Telegram supports 443, 80, 88, 8443):
+**nginx on port 8443** (Telegram natively supports 443, 80, 88, 8443):
 ```nginx
 server {
     listen 8443 ssl;
@@ -121,18 +103,14 @@ server {
     ssl_certificate     /etc/letsencrypt/live/your-name.duckdns.org/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/your-name.duckdns.org/privkey.pem;
 
-    location /webhook {
-        proxy_pass http://127.0.0.1:8000;
-    }
-    location /health {
+    location / {
         proxy_pass http://127.0.0.1:8000;
     }
 }
 ```
 
-**Let's Encrypt via DNS challenge** (no port 80 needed):
+**Let's Encrypt via DNS challenge** (no port 80/443 needed):
 ```bash
-# Install certbot + DuckDNS plugin
 pip install certbot certbot-dns-duckdns
 certbot certonly \
   --authenticator dns-duckdns \
@@ -140,92 +118,92 @@ certbot certonly \
   -d your-name.duckdns.org
 ```
 
-**systemd service** (`/etc/systemd/system/proxy.service`):
+**systemd service** (`/etc/systemd/system/hermes.service`):
 ```ini
 [Unit]
-Description=Inflight Telegram Bot
+Description=Hermes Telegram Bot
 After=network.target
 
 [Service]
-WorkingDirectory=/home/pi/dev/proxy
-ExecStart=/home/pi/dev/proxy/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+WorkingDirectory=/home/pi/hermes
+ExecStart=/home/pi/hermes/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
-```bash
-sudo systemctl enable proxy
-sudo systemctl start proxy
-```
 
-### Option C — Fly.io (cloud, free tier)
-
-Zero infrastructure to manage. Free tier covers a small always-on instance.
+### Fly.io (free tier, zero maintenance)
 
 ```bash
-# Install flyctl: https://fly.io/docs/hands-on/install-flyctl/
-fly auth login
-fly launch          # creates fly.toml, detects Dockerfile
-fly secrets set \
-  TELEGRAM_TOKEN=... \
-  ANTHROPIC_API_KEY=... \
-  GEMINI_API_KEY=... \
-  XAI_API_KEY=... \
-  TELEGRAM_ALLOWED_USER_ID=... \
-  WEBHOOK_BASE_URL=https://your-app-name.fly.dev \
-  WEBHOOK_SECRET_TOKEN=...
+fly launch
+fly secrets set TELEGRAM_TOKEN=... ANTHROPIC_API_KEY=... GEMINI_API_KEY=... \
+  XAI_API_KEY=... TELEGRAM_ALLOWED_USER_ID=... \
+  WEBHOOK_BASE_URL=https://your-app.fly.dev WEBHOOK_SECRET_TOKEN=...
 fly deploy
 ```
 
-The `WEBHOOK_BASE_URL` will be `https://your-app-name.fly.dev` (port 443, standard HTTPS).
+### Railway.app ($5/month, auto-deploy from GitHub)
 
-Update `Dockerfile` CMD for Fly:
-```dockerfile
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+Connect your repo, set env vars in the dashboard, done. Set `WEBHOOK_BASE_URL` to your Railway domain.
+
+### Local + ngrok (development)
+
+```bash
+ngrok http 8000                    # copy the https URL
+# set WEBHOOK_BASE_URL in .env
+uvicorn main:app --reload
 ```
-
-### Option D — Railway.app
-
-Similar to Fly, $5/month on the hobby plan. Connect your GitHub repo → set env vars in the dashboard → auto-deploys on push.
-
-Set `PORT` to `8080` and `WEBHOOK_BASE_URL` to your Railway-provided domain.
 
 ---
 
 ## Project structure
 
 ```
-proxy/
-├── main.py           # FastAPI app, webhook endpoint, lifespan startup
-├── bot.py            # Telegram handlers, per-chat history + model stickiness
-├── agent.py          # AI routing, Gemini + Claude loops, slash command handlers
-├── config.py         # All env vars via pydantic-settings
+hermes/
+├── main.py           FastAPI app, webhook endpoint, lifespan startup
+├── bot.py            Telegram handlers, per-chat history + model stickiness
+├── agent.py          AI routing, Gemini + Claude loops, slash command handlers
+├── config.py         All env vars via pydantic-settings
 ├── tools/
-│   ├── fetch.py      # Generic URL → text (used by Claude)
-│   ├── pdf.py        # PDF download + PyMuPDF extraction
-│   ├── weather.py    # wttr.in weather
-│   ├── grok.py       # xAI API for /wiki
-│   └── stocks.py     # yfinance stock quotes
+│   ├── fetch.py      URL → text (used by Claude tool loop)
+│   ├── pdf.py        PDF download + PyMuPDF text extraction
+│   ├── weather.py    wttr.in (free, no key)
+│   ├── grok.py       xAI API for /wiki
+│   └── stocks.py     yfinance (free, no key)
 ├── requirements.txt
-├── .env.example
 ├── Dockerfile
+├── .env.example
 └── .gitignore
 ```
 
-## Security notes
+## Stack
 
-- **User ID guard**: only your Telegram user ID can interact with the bot. All other senders receive "Unauthorized." immediately.
-- **Webhook secret**: every POST to `/webhook` must include the correct `X-Telegram-Bot-Api-Secret-Token` header. Requests without it return 403.
-- **No credentials in code**: all secrets are environment variables, loaded via pydantic-settings. Never commit `.env`.
-- **Tool loop cap**: `MAX_TOOL_ITERATIONS=5` prevents runaway agent loops.
+| Component | Purpose | Cost |
+|---|---|---|
+| [python-telegram-bot 22.x](https://github.com/python-telegram-bot/python-telegram-bot) | Telegram webhook handling | Free |
+| [FastAPI](https://fastapi.tiangolo.com) + uvicorn | Webhook server | Free |
+| [Google Gemini](https://aistudio.google.com) | Primary AI + Google Search | Free tier |
+| [Anthropic Claude](https://console.anthropic.com) | Fallback + PDF/URL tools | Pay-per-use |
+| [xAI Grok](https://console.x.ai) | /wiki encyclopedia entries | Pay-per-use |
+| [yfinance](https://github.com/ranaroussi/yfinance) | Stock quotes | Free |
+| [wttr.in](https://wttr.in) | Weather data | Free |
+| [PyMuPDF](https://pymupdf.readthedocs.io) | PDF text extraction | Free |
 
-## Cost expectations
+## Security
 
-Typical usage (10–20 queries/flight):
-- **Gemini**: free tier (generous daily quota) covers most general queries
-- **Claude**: fallback only; at `claude-sonnet-4-6` pricing, ~$0.01–0.03 per query
-- **Grok**: `/wiki` only; negligible usage cost
+- **Owner-only access** — locked to a single Telegram user ID. All other users are rejected immediately.
+- **Webhook secret** — every incoming POST is validated against `X-Telegram-Bot-Api-Secret-Token`. No secret, no access.
+- **No secrets in code** — everything is in `.env`, loaded via pydantic-settings.
+- **Agent loop cap** — `MAX_TOOL_ITERATIONS=5` prevents runaway tool calls.
 
-Stay well within free tiers on a typical flight.
+## Cost
+
+Most queries hit Gemini's free tier. Claude is fallback only (~$0.01–0.03 per query). Grok is used only for `/wiki`. Typical daily cost for moderate usage: under $0.05.
+
+---
+
+## License
+
+MIT
