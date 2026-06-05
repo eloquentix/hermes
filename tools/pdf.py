@@ -37,3 +37,14 @@ async def fetch_pdf(url: str, max_chars: int = 3000) -> str:
     doc.close()
 
     return "\n".join(pages_text)[:max_chars]
+
+
+async def fetch_pdf_bytes(url: str) -> tuple[bytes, str]:
+    """Download PDF and return (raw_bytes, filename)."""
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.get(url, headers=_HEADERS)
+        resp.raise_for_status()
+    filename = url.rstrip("/").rsplit("/", 1)[-1]
+    if not filename.endswith(".pdf"):
+        filename += ".pdf"
+    return resp.content, filename

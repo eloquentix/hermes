@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # xAI / Grok (for /wiki)
     xai_api_key: str
 
+    # Google Custom Search (for /image)
+    google_cse_api_key: str = ""
+    google_cse_cx: str = ""
+
     # Behavior
     max_response_chars: int = 280
     max_tool_iterations: int = 5

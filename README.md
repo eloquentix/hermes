@@ -11,7 +11,8 @@ One strong use case: **reliable answers on airplane WiFi without paying for inte
 ## What it does
 
 - **Ask anything** — web search powered by Gemini (Google Search built-in), Claude as fallback
-- **Fetch + summarize PDFs** — paste a URL, get key points back
+- **Fetch + summarize PDFs** — paste a URL, get key points back + the file itself
+- **Image search** — find and send images via Google CSE or Wikipedia
 - **Slash commands** — weather, stocks, news, flight status, wiki, translation
 - **Conversation memory** — 12-turn context per chat
 - **Owner-locked** — only your Telegram user ID can use it; everyone else gets rejected
@@ -23,7 +24,8 @@ One strong use case: **reliable answers on airplane WiFi without paying for inte
 /weather <city>         current weather
 /flight <LH441>         live flight status
 /news [topic]           top 5 headlines
-/pdf <url or name>      fetch and summarize a PDF
+/pdf <url or name>      fetch, summarize + send PDF
+/image <topic>          find and send an image
 /wiki <topic>           encyclopedia summary (powered by Grok)
 /stocks <AAPL TSLA>     live stock quotes
 /tr <lang> <text>       translate
@@ -171,6 +173,7 @@ hermes/
 │   ├── pdf.py        PDF download + PyMuPDF text extraction
 │   ├── weather.py    wttr.in (free, no key)
 │   ├── grok.py       xAI API for /wiki
+│   ├── images.py     Google CSE image search (optional) + Wikipedia fallback
 │   └── stocks.py     yfinance (free, no key)
 ├── requirements.txt
 ├── Dockerfile
