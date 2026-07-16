@@ -1,3 +1,4 @@
+import html
 import re
 import httpx
 
@@ -18,6 +19,11 @@ SCHEMA = {
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; inflightbot/1.0)"}
 
+# script/style/head contents survive plain tag-stripping — drop whole blocks
+_STRIP_BLOCKS_RE = re.compile(
+    r"<(script|style|head|noscript)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE
+)
+
 
 async def fetch_url(url: str, max_chars: int = 1500) -> str:
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
@@ -28,6 +34,8 @@ async def fetch_url(url: str, max_chars: int = 1500) -> str:
     if "pdf" in content_type:
         return "This URL is a PDF. Use the fetch_pdf tool instead."
 
-    text = re.sub(r"<[^>]+>", " ", resp.text)
+    text = _STRIP_BLOCKS_RE.sub(" ", resp.text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_chars]

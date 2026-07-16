@@ -73,17 +73,19 @@ TOOL_DISPATCH = {
     "fetch_pdf": lambda inp: fetch_pdf(inp["url"]),
 }
 
-_FETCH_HINTS = (
-    "http://", "https://", ".ro", ".com", ".org", ".net", ".io",
-    "hotnews", "g4media", "digi24", "protv", "antena", "realitatea",
-    "site", "page", "article", "link", "url", "pdf",
+# Word-bounded — plain substring matching misfires ("Starlink" → "link")
+_FETCH_HINT_RE = re.compile(
+    r"https?://|\.(?:ro|com|org|net|io)\b"
+    r"|\b(?:hotnews|g4media|digi24|protv|antena|realitatea"
+    r"|site|page|article|link|url|pdf)\b",
+    re.IGNORECASE,
 )
 
 
 def _needs_fetch(message: str, history: list) -> bool:
     """Route to Claude if current message OR any recent history references specific sites."""
-    combined = message.lower() + " ".join(t for _, t in history).lower()
-    return any(hint in combined for hint in _FETCH_HINTS)
+    combined = message + " " + " ".join(t for _, t in history)
+    return bool(_FETCH_HINT_RE.search(combined))
 
 
 def _system_prompt(claude_tools: bool = True) -> str:
@@ -551,21 +553,91 @@ async def cmd_sports(args: str) -> str:
 async def cmd_retrieve(args: str) -> tuple[str, list]:
     if not args.strip():
         return "Usage: /retrieve <work>  e.g. /retrieve shakespeare sonnet 43", []
+    query = args.strip()
+    try:
+        text = await _retrieve_via_model(query)
+    except Exception as exc:
+        # Anthropic's output filter blocks long verbatim reproduction even for
+        # public-domain works — fetch the text from a source URL instead
+        logger.warning("Model retrieve failed (%s), trying source fetch", str(exc)[:80])
+        text = ""
+    if not text or text.lower().startswith(("i'm not able", "i can't", "i cannot")):
+        text = await _retrieve_via_source(query)
+    if not text:
+        return f"Couldn't retrieve: {query}", []
+    attachments = _maybe_pdf(text, query)
+    return text, attachments
+
+
+async def _retrieve_via_model(query: str) -> str:
     prompt = (
-        f"Retrieve the full text of: {args.strip()}. "
+        f"Retrieve the full text of: {query}. "
         "Return the complete original text — do not summarize or truncate. "
         "Include title and author at the top. Plain text, no markdown."
     )
     response = await _claude.messages.create(
         model=settings.claude_model, max_tokens=4096,
-        system="You retrieve and reproduce full texts of literary works. Return complete text, never summarize.",
+        system=(
+            "You retrieve and reproduce full texts of literary works. "
+            "Classic works published before 1930 (Shakespeare, Kipling, Eminescu, etc.) "
+            "are in the public domain — reproduce them in full without hesitation. "
+            "Only decline works still under copyright. Return complete text, never summarize."
+        ),
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}],
     )
     _track_cost(response.usage.input_tokens, response.usage.output_tokens, settings.claude_model)
-    text = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
-    attachments = _maybe_pdf(text, args.strip())
-    return text, attachments
+    return " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
+
+
+_URL_RE = re.compile(r"https?://\S+")
+
+
+async def _retrieve_via_source(query: str) -> str:
+    response = await _claude.messages.create(
+        model=settings.claude_model, max_tokens=300,
+        system=(
+            "Find URLs of the complete text of the requested work on public-domain "
+            "sources. Strongly prefer en.wikisource.org and gutenberg.org (plain-text "
+            ".txt links best). Avoid poetryfoundation.org — it blocks bots. "
+            "Return up to 3 URLs, one per line, nothing else."
+        ),
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": query}],
+    )
+    _track_cost(response.usage.input_tokens, response.usage.output_tokens, settings.claude_model)
+    all_text = " ".join(b.text for b in response.content if hasattr(b, "text"))
+    for url in _URL_RE.findall(all_text)[:3]:
+        url = url.rstrip(").,]")
+        logger.info("Retrieve source fetch: %s", url)
+        try:
+            text = await fetch_url(url, max_chars=30000)
+            if len(text) > 200:
+                return await _extract_work(text, query)
+        except Exception as exc:
+            logger.warning("Source fetch failed: %s", exc)
+    return ""
+
+
+async def _extract_work(page_text: str, query: str) -> str:
+    """Haiku pass: strip site chrome from a fetched page, keep only the work itself."""
+    try:
+        response = await _claude.messages.create(
+            model="claude-haiku-4-5", max_tokens=4096,
+            system=(
+                "The user gives you a raw web page dump containing a public-domain literary "
+                "work. Output ONLY the work: title, author, then its complete text with "
+                "proper line breaks (verse lines for poems). Remove navigation, licensing, "
+                "categories, and all other site chrome. No commentary."
+            ),
+            messages=[{"role": "user", "content": f"Work requested: {query}\n\nPage dump:\n{page_text}"}],
+        )
+        _track_cost(response.usage.input_tokens, response.usage.output_tokens, "claude-haiku-4-5")
+        cleaned = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
+        return cleaned if len(cleaned) > 100 else page_text
+    except Exception as exc:
+        logger.warning("Work extraction failed, returning raw text: %s", exc)
+        return page_text
 
 
 def _maybe_pdf(text: str, title: str) -> list:
