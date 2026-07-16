@@ -4,8 +4,11 @@ from config import settings
 _HEADERS = {"Content-Type": "application/json"}
 
 
-async def grokipedia(topic: str, max_chars: int = 280) -> str:
-    """Ask Grok to write a Grokipedia-style encyclopedia summary of a topic."""
+async def grokipedia(topic: str, max_chars: int = 280) -> tuple[str, dict]:
+    """Ask Grok to write a Grokipedia-style encyclopedia summary of a topic.
+
+    Returns (text, usage) so the caller can track cost.
+    """
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.x.ai/v1/chat/completions",
@@ -25,4 +28,5 @@ async def grokipedia(topic: str, max_chars: int = 280) -> str:
             },
         )
         resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"].strip(), data.get("usage", {})

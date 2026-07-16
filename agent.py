@@ -13,38 +13,58 @@ from config import settings
 _cost_today: float = 0.0
 _cost_date: str = ""
 _cost_calls: int = 0
+_cost_by_model: dict[str, float] = {}
+
+# USD per million tokens (input, output), matched by model id prefix
+_PRICING = (
+    ("claude-opus", (5.0, 25.0)),
+    ("claude-sonnet", (3.0, 15.0)),
+    ("claude-haiku", (1.0, 5.0)),
+    ("claude", (3.0, 15.0)),
+    ("grok", (3.0, 15.0)),
+)
 
 
-def _track_cost(input_tokens: int, output_tokens: int, model: str = "claude") -> None:
+def _track_cost(input_tokens: int, output_tokens: int, model: str, cost_usd: float = None) -> None:
+    """Track spend. cost_usd overrides token math when the provider reports exact cost."""
     global _cost_today, _cost_date, _cost_calls
     today = date.today().isoformat()
     if _cost_date != today:
         _cost_today = 0.0
         _cost_calls = 0
+        _cost_by_model.clear()
         _cost_date = today
-    # Claude Sonnet 4: $3/M input, $15/M output
-    # Grok: ~$3/M input, $15/M output (similar)
-    if "claude" in model:
-        cost = (input_tokens * 3 + output_tokens * 15) / 1_000_000
-    elif "grok" in model:
-        cost = (input_tokens * 3 + output_tokens * 15) / 1_000_000
+    if cost_usd is None:
+        price_in, price_out = 0.0, 0.0
+        for prefix, (p_in, p_out) in _PRICING:
+            if model.startswith(prefix):
+                price_in, price_out = p_in, p_out
+                break
+        cost = (input_tokens * price_in + output_tokens * price_out) / 1_000_000
     else:
-        cost = 0.0
+        cost = cost_usd
     _cost_today += cost
+    _cost_by_model[model] = _cost_by_model.get(model, 0.0) + cost
     _cost_calls += 1
 
 
 def get_daily_cost() -> str:
     today = date.today().isoformat()
-    if _cost_date != today:
-        return f"Today ({today}): $0.00 — 0 API calls. Gemini calls are free."
-    return f"Today ({_cost_date}): ${_cost_today:.4f} — {_cost_calls} paid API calls. Gemini calls are free."
+    if _cost_date != today or not _cost_calls:
+        return f"Today ({today}): $0.00 — 0 paid API calls. Gemini calls are free."
+    lines = [f"Today ({_cost_date}): ${_cost_today:.4f} — {_cost_calls} paid API calls"]
+    for model, cost in sorted(_cost_by_model.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {model}: ${cost:.4f}")
+    lines.append("Gemini calls are free.")
+    return "\n".join(lines)
 from tools.fetch import fetch_url, SCHEMA as FETCH_SCHEMA
 from tools.pdf import fetch_pdf, fetch_pdf_bytes, SCHEMA as PDF_SCHEMA
 from tools.weather import get_weather
 from tools.grok import grokipedia
 from tools.stocks import get_stock
 from tools.images import search_image
+from tools.flight import flight_status
+from tools.wiki import get_wiki
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +76,7 @@ TOOL_DISPATCH = {
 _FETCH_HINTS = (
     "http://", "https://", ".ro", ".com", ".org", ".net", ".io",
     "hotnews", "g4media", "digi24", "protv", "antena", "realitatea",
-    "site", "page", "article", "link", "url",
+    "site", "page", "article", "link", "url", "pdf",
 )
 
 
@@ -66,23 +86,28 @@ def _needs_fetch(message: str, history: list) -> bool:
     return any(hint in combined for hint in _FETCH_HINTS)
 
 
-def _system_prompt() -> str:
+def _system_prompt(claude_tools: bool = True) -> str:
+    """Base prompt. claude_tools=True adds Claude-specific tool rules — never send
+    those to Grok/Gemini, which lack web_search/fetch_pdf and will echo tool calls
+    as literal text."""
     today = date.today().strftime("%B %d, %Y")
-    return f"""You are a concise assistant on Telegram.
-Today's date is {today}. Use this when interpreting "this year", "today", "recently", etc.
-Small screen, limited WiFi. Every character counts.
-
+    tool_rules = """
 TOOL RULES:
 - PDF requests: use web_search to find the direct PDF URL, then call fetch_pdf. Never summarize from snippets alone.
 - Direct .pdf URLs: call fetch_pdf immediately.
 - All other questions: use web_search.
-
+""" if claude_tools else ""
+    return f"""You are a concise assistant on Telegram.
+Today's date is {today}. Use this when interpreting "this year", "today", "recently", etc.
+Small screen, limited WiFi. Every character counts.
+{tool_rules}
 OUTPUT RULES:
 - Max {settings.max_response_chars} characters. Plain text only. No markdown, no bullets, no asterisks.
 - No preamble. Answer directly.
 - PDF: 3-5 key points separated by " | ".
 - Score: "Barcelona 2 - Real Madrid 1. Final."
 - Never apologize or explain your process.
+- Never reply with a description of a search you would do — always answer with the information itself.
 - Image requests are handled separately. Never say you cannot show images."""
 
 
@@ -95,7 +120,7 @@ GEMINI_TOOLS = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
 
 
 async def _run_gemini(user_message: str, history: list, preferred_model: str = None) -> tuple[str, str]:
-    system = _system_prompt() + "\n\nNote: no PDF fetching — for PDF requests summarize from search results as best you can."
+    system = _system_prompt(claude_tools=False) + "\n\nYou have Google Search — use it for anything current or factual. No PDF fetching — for PDF requests summarize from search results as best you can."
     contents = []
     for role, text in history:
         g_role = "model" if role == "assistant" else "user"
@@ -149,23 +174,27 @@ CLAUDE_TOOLS = [
 ]
 
 
-async def _run_claude(user_message: str, history: list) -> tuple[str, str]:
+async def _run_claude(
+    user_message: str, history: list, model: str = None, attachments_out: list = None
+) -> tuple[str, str]:
+    """attachments_out: pass a list to receive the first fetched PDF as a document attachment."""
+    model = model or settings.claude_model
     system = _system_prompt()
     messages = [{"role": role, "content": text} for role, text in history]
     messages.append({"role": "user", "content": user_message})
 
     for iteration in range(settings.max_tool_iterations):
         response = await _claude.messages.create(
-            model=settings.claude_model,
+            model=model,
             max_tokens=512,
             system=system,
             tools=CLAUDE_TOOLS,
             messages=messages,
         )
         logger.info("Claude stop_reason=%s iter=%d", response.stop_reason, iteration)
+        _track_cost(response.usage.input_tokens, response.usage.output_tokens, model)
 
         if response.stop_reason == "end_turn":
-            _track_cost(response.usage.input_tokens, response.usage.output_tokens, "claude")
             text = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
             if len(text) > settings.max_response_chars:
                 text = text[: settings.max_response_chars].rsplit(" ", 1)[0] + "…"
@@ -183,6 +212,13 @@ async def _run_claude(user_message: str, history: list) -> tuple[str, str]:
                 try:
                     result = await tool_fn(block.input)
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(result)})
+                    if block.name == "fetch_pdf" and attachments_out is not None and not attachments_out:
+                        try:
+                            pdf_bytes, filename = await fetch_pdf_bytes(block.input["url"])
+                            if len(pdf_bytes) < 50 * 1024 * 1024:  # Telegram document limit
+                                attachments_out.append({"type": "document", "data": pdf_bytes, "filename": filename})
+                        except Exception as exc:
+                            logger.warning("PDF attachment fetch failed: %s", exc)
                 except Exception as exc:
                     logger.warning("Tool %s failed: %s", block.name, exc)
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": f"Error: {exc}", "is_error": True})
@@ -197,24 +233,48 @@ async def _run_claude(user_message: str, history: list) -> tuple[str, str]:
 
 # ── Grok (xAI — free-form via /grok command) ────────────────────────────────
 
+GROK_MODEL = "grok-4.3"
+
+# Grok cites sources as markdown [[1]](url) — strip for plain-text Telegram
+_GROK_CITATION_RE = re.compile(r"\s*\[\[\d+\]\]\(\S+?\)")
+
+
 async def _run_grok(user_message: str, history: list) -> str:
-    system = _system_prompt()
+    system = _system_prompt(claude_tools=False)
     messages = [{"role": "assistant" if r == "assistant" else "user", "content": t} for r, t in history]
     messages.append({"role": "user", "content": user_message})
-    async with httpx.AsyncClient(timeout=30) as client:
+    # /v1/responses with server-side web_search — Live Search on chat/completions is 410 Gone
+    async with httpx.AsyncClient(timeout=90) as client:
         resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
+            "https://api.x.ai/v1/responses",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings.xai_api_key}"},
-            json={"model": "grok-4.3", "messages": [{"role": "system", "content": system}] + messages, "max_tokens": 512},
+            json={
+                "model": GROK_MODEL,
+                "input": [{"role": "system", "content": system}] + messages,
+                "tools": [{"type": "web_search"}],
+                "max_output_tokens": 1024,
+            },
         )
         resp.raise_for_status()
     data = resp.json()
-    text = data["choices"][0]["message"]["content"].strip()
+    parts = []
+    for item in data.get("output", []):
+        if item.get("type") == "message":
+            for part in item.get("content", []):
+                if part.get("type") == "output_text" and part.get("text"):
+                    parts.append(part["text"])
+    text = _GROK_CITATION_RE.sub("", " ".join(parts)).strip()
     usage = data.get("usage", {})
-    _track_cost(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), "grok")
+    ticks = usage.get("cost_in_usd_ticks")
+    _track_cost(
+        usage.get("input_tokens", 0),
+        usage.get("output_tokens", 0),
+        GROK_MODEL,
+        cost_usd=ticks / 1e10 if ticks else None,
+    )
     if len(text) > settings.max_response_chars:
         text = text[:settings.max_response_chars].rsplit(" ", 1)[0] + "…"
-    return text
+    return text or "No answer found."
 
 
 # ── Image helpers ────────────────────────────────────────────────────────────
@@ -315,6 +375,7 @@ async def _find_image(topic: str) -> dict | None:
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": f"Find 3 direct image URLs for: {topic}"}],
         )
+        _track_cost(response.usage.input_tokens, response.usage.output_tokens, settings.claude_model)
         all_text = " ".join(b.text for b in response.content if hasattr(b, "text"))
         urls = _IMAGE_URL_RE.findall(all_text)
         urls = [u for u in urls if "/thumb/" not in u] or urls
@@ -347,10 +408,22 @@ async def _find_image(topic: str) -> dict | None:
 
 # ── Slash command handlers ────────────────────────────────────────────────────
 
+_WEATHER_TIME_WORDS = {
+    "this", "week", "weekend", "today", "tonight", "tomorrow",
+    "forecast", "next", "days", "hourly", "monday", "tuesday",
+    "wednesday", "thursday", "friday", "saturday", "sunday",
+}
+
+
 async def cmd_weather(args: str) -> str:
-    city = args.strip() or "Bucharest"
+    query = args.strip() or "Bucharest"
+    # wttr.in only does current conditions and fuzzy-matches extra words as city
+    # names ("Bucharest this week" → Wick, UK) — send time-qualified queries to AI
+    if any(w in _WEATHER_TIME_WORDS for w in query.lower().split()):
+        answer, _ = await _run_gemini(f"Weather forecast: {query}. Concise, plain text.", [])
+        return answer
     try:
-        return await get_weather(city)
+        return await get_weather(query)
     except Exception as exc:
         return f"Weather unavailable: {exc}"
 
@@ -358,16 +431,36 @@ async def cmd_weather(args: str) -> str:
 async def cmd_wiki(args: str) -> str:
     if not args.strip():
         return "Usage: /wiki <topic>"
+    topic = args.strip()
     try:
-        return await grokipedia(args.strip(), settings.max_response_chars)
+        text, usage = await grokipedia(topic, settings.max_response_chars)
+        _track_cost(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), GROK_MODEL)
+        return text
     except Exception as exc:
-        return f"Grok unavailable: {exc}"
+        logger.warning("Grok wiki failed: %s", exc)
+    # Free Wikipedia fallback
+    try:
+        summary = await get_wiki(topic)
+    except Exception as exc:
+        return f"Wiki unavailable: {exc}"
+    if not summary:
+        return f"No wiki entry found for: {topic}"
+    if len(summary) > settings.max_response_chars:
+        summary = summary[: settings.max_response_chars].rsplit(" ", 1)[0] + "…"
+    return summary
 
 
 async def cmd_flight(args: str) -> str:
     if not args.strip():
         return "Usage: /flight <number>  e.g. /flight LH441"
-    prompt = f"Current status of flight {args.strip().upper()}. One line: flight number, status, departure airport+time, arrival airport+time, any delay."
+    number = args.strip().upper()
+    # Live flight API when configured, AI search otherwise
+    if settings.aviationstack_api_key:
+        try:
+            return await flight_status(number)
+        except Exception as exc:
+            logger.warning("aviationstack failed, falling back to Gemini: %s", exc)
+    prompt = f"Current status of flight {number}. One line: flight number, status, departure airport+time, arrival airport+time, any delay."
     answer, _ = await _run_gemini(prompt, [])
     return answer
 
@@ -393,7 +486,7 @@ async def cmd_pdf(args: str) -> tuple[str, list]:
         except Exception as exc:
             logger.warning("PDF download for attachment failed: %s", exc)
     prompt = f"Fetch and summarize this PDF: {url}"
-    answer, _ = await _run_claude(prompt, [])
+    answer, _ = await _run_claude(prompt, [], attachments_out=attachments)
     return answer, attachments
 
 
@@ -469,7 +562,7 @@ async def cmd_retrieve(args: str) -> tuple[str, list]:
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}],
     )
-    _track_cost(response.usage.input_tokens, response.usage.output_tokens, "claude")
+    _track_cost(response.usage.input_tokens, response.usage.output_tokens, settings.claude_model)
     text = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
     attachments = _maybe_pdf(text, args.strip())
     return text, attachments
@@ -489,6 +582,56 @@ def _maybe_pdf(text: str, title: str) -> list:
         return []
 
 
+async def cmd_grok(args: str) -> str:
+    if not args.strip():
+        return "Usage: /grok <question>"
+    return await _run_grok(args.strip(), [])
+
+
+_CLAUDE_MODELS = {
+    "claude": settings.claude_model,
+    "sonnet": "claude-sonnet-4-6",
+    "opus":   "claude-opus-4-8",
+    "haiku":  "claude-haiku-4-5",
+}
+
+
+async def _run_claude_model(question: str, model: str) -> str:
+    text, _ = await _run_claude(question, [], model)
+    return text
+
+
+async def cmd_claude(args: str) -> str:
+    if not args.strip():
+        return "Usage: /claude <question>"
+    return await _run_claude_model(args.strip(), _CLAUDE_MODELS["claude"])
+
+
+async def cmd_opus(args: str) -> str:
+    if not args.strip():
+        return "Usage: /opus <question>"
+    return await _run_claude_model(args.strip(), _CLAUDE_MODELS["opus"])
+
+
+async def cmd_sonnet(args: str) -> str:
+    if not args.strip():
+        return "Usage: /sonnet <question>"
+    return await _run_claude_model(args.strip(), _CLAUDE_MODELS["sonnet"])
+
+
+async def cmd_haiku(args: str) -> str:
+    if not args.strip():
+        return "Usage: /haiku <question>"
+    return await _run_claude_model(args.strip(), _CLAUDE_MODELS["haiku"])
+
+
+async def cmd_gemini(args: str) -> str:
+    if not args.strip():
+        return "Usage: /gemini <question>"
+    answer, _ = await _run_gemini(args.strip(), [])
+    return answer
+
+
 async def cmd_cost(args: str) -> str:
     return get_daily_cost()
 
@@ -506,6 +649,12 @@ COMMANDS = {
     "sports":   cmd_sports,
     "retrieve": cmd_retrieve,
     "cost":     cmd_cost,
+    "grok":     cmd_grok,
+    "claude":   cmd_claude,
+    "opus":     cmd_opus,
+    "sonnet":   cmd_sonnet,
+    "haiku":    cmd_haiku,
+    "gemini":   cmd_gemini,
 }
 
 
@@ -530,22 +679,30 @@ async def run_agent(user_message: str, history: list = None, preferred_model: st
     # Explicit model routing
     if preferred_model == "claude":
         logger.info("Routing to Claude (user choice)")
-        text, model = await _run_claude(user_message, history)
-        return text, model, []
+        atts = []
+        text, model = await _run_claude(user_message, history, attachments_out=atts)
+        return text, model, atts
 
     if preferred_model == "grok":
         logger.info("Routing to Grok (user choice)")
         text = await _run_grok(user_message, history)
         return text, "grok", []
 
+    if preferred_model == "gemini":
+        logger.info("Routing to Gemini (user choice)")
+        text, model = await _run_gemini(user_message, history)
+        return text, model, []
+
     if _needs_fetch(user_message, history):
         logger.info("Routing to Claude (fetch needed)")
-        text, model = await _run_claude(user_message, history)
-        return text, model, []
+        atts = []
+        text, model = await _run_claude(user_message, history, attachments_out=atts)
+        return text, model, atts
     try:
         text, model = await _run_gemini(user_message, history, preferred_model)
         return text, model, []
     except Exception as exc:
         logger.warning("Gemini failed (%s), falling back to Claude", str(exc)[:60])
-        text, model = await _run_claude(user_message, history)
-        return text, model, []
+        atts = []
+        text, model = await _run_claude(user_message, history, attachments_out=atts)
+        return text, model, atts

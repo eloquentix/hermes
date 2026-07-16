@@ -22,16 +22,29 @@ One strong use case: **reliable answers on airplane WiFi without paying for inte
 
 ```
 /weather <city>         current weather
-/flight <LH441>         live flight status
+/flight <LH441>         live flight status (aviationstack or AI search)
 /news [topic]           top 5 headlines
+/search <query>         web search, top result with URL
+/sports <topic>         scores and results
+/retrieve <work>        full text of poems, speeches, etc. (+ PDF)
 /pdf <url or name>      fetch, summarize + send PDF
 /image <topic>          find and send an image
-/wiki <topic>           encyclopedia summary (powered by Grok)
+/wiki <topic>           encyclopedia summary (Grok, Wikipedia fallback)
 /stocks <AAPL TSLA>     live stock quotes
 /tr <lang> <text>       translate
+
+/claude <question>      ask Claude directly
+/opus /sonnet /haiku    ask a specific Claude model
+/gemini <question>      ask Gemini directly
+/grok <question>        ask Grok directly
+/model [name|auto]      show or lock the conversation model
+
+/cost                   today's API spend by model
 /clear                  reset conversation
 /help                   command list
 ```
+
+Long answers are split across multiple Telegram messages automatically (4096-char limit), and anything over ~1500 chars also arrives as a PDF attachment.
 
 ---
 
@@ -59,6 +72,8 @@ You need a public HTTPS URL for Telegram's webhook. For local dev, use [ngrok](h
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) | Free tier |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) | Pay-per-use |
 | `XAI_API_KEY` | [console.x.ai](https://console.x.ai) | Pay-per-use |
+| `AVIATIONSTACK_API_KEY` (optional) | [aviationstack.com](https://aviationstack.com) | Free tier, 100 calls/mo |
+| `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` (optional) | [console.cloud.google.com](https://console.cloud.google.com/apis/credentials) | Free, 100 queries/day |
 
 **3. Webhook secret** — generate one: `python -c "import secrets; print(secrets.token_hex(32))"`
 
@@ -170,9 +185,11 @@ hermes/
 ├── config.py         All env vars via pydantic-settings
 ├── tools/
 │   ├── fetch.py      URL → text (used by Claude tool loop)
-│   ├── pdf.py        PDF download + PyMuPDF text extraction
+│   ├── pdf.py        PDF download + PyMuPDF text extraction + text→PDF generation
 │   ├── weather.py    wttr.in (free, no key)
 │   ├── grok.py       xAI API for /wiki
+│   ├── wiki.py       Wikipedia REST summary (free /wiki fallback)
+│   ├── flight.py     aviationstack live flight status (optional key)
 │   ├── images.py     Google CSE image search (optional) + Wikipedia fallback
 │   └── stocks.py     yfinance (free, no key)
 ├── requirements.txt

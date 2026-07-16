@@ -12,20 +12,23 @@ class Settings(BaseSettings):
     webhook_base_url: str
     webhook_secret_token: str
 
-    # Claude (primary — paid, native web search + PDF)
-    anthropic_api_key: str
-    claude_model: str = "claude-sonnet-4-6"
-
-    # Gemini (fallback — free tier, PDF only)
+    # Gemini (primary — free tier, google_search built-in)
     gemini_api_key: str
     gemini_models: str = "gemini-2.5-flash-lite,gemini-2.5-flash"
 
-    # xAI / Grok (for /wiki)
+    # Claude (paid — URL/PDF fetching, fallback for Gemini failures)
+    anthropic_api_key: str
+    claude_model: str = "claude-sonnet-4-6"
+
+    # xAI / Grok (for /wiki and /grok)
     xai_api_key: str
 
     # Google Custom Search (for /image)
     google_cse_api_key: str = ""
     google_cse_cx: str = ""
+
+    # Aviationstack (optional — live /flight data; Gemini search fallback if unset)
+    aviationstack_api_key: str = ""
 
     # Behavior
     max_response_chars: int = 280

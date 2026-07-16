@@ -13,6 +13,34 @@ logger = logging.getLogger(__name__)
 _history: dict[int, deque] = {}
 _model: dict[int, str] = {}   # locked model for each conversation
 MAX_HISTORY = 12
+TELEGRAM_MAX = 4096  # Telegram hard limit per message
+
+
+def _split_message(text: str, limit: int = TELEGRAM_MAX) -> list[str]:
+    """Split text into Telegram-sized chunks on paragraph/sentence/word boundaries."""
+    chunks = []
+    while len(text) > limit:
+        cut = text.rfind("\n\n", 0, limit)
+        if cut < limit // 2:
+            cut = text.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = text.rfind(". ", 0, limit)
+            if cut != -1:
+                cut += 1  # keep the period with the first chunk
+        if cut < limit // 2:
+            cut = text.rfind(" ", 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+async def _reply(update: Update, text: str) -> None:
+    for chunk in _split_message(text):
+        await update.message.reply_text(chunk)
 
 
 def _get_history(chat_id: int) -> deque:
@@ -30,7 +58,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = (update.message.text or "").strip()
     if not text:
         return
+    await _process_text(update, context, text)
 
+
+async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Unrecognized /command — treat it as a free-form question instead of silence."""
+    user = update.effective_user
+    if user is None or user.id != settings.telegram_allowed_user_id:
+        return
+    text = (update.message.text or "").lstrip("/").strip()
+    if not text:
+        return
+    logger.info("Unknown command, routing as free text: %s", text)
+    await _process_text(update, context, text)
+
+
+async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     chat_id = update.effective_chat.id
     history = _get_history(chat_id)
 
@@ -57,7 +100,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     attachments.extend(_maybe_pdf(answer, text[:60]))
 
     if answer:
-        await update.message.reply_text(answer)
+        await _reply(update, answer)
     await _send_attachments(update, attachments)
 
 
@@ -80,14 +123,28 @@ async def _send_attachments(update: Update, attachments: list) -> None:
             logger.warning("Failed to send attachment: %s", exc)
 
 
-async def handle_model_switch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show or set the model lock for this conversation."""
     user = update.effective_user
     if user is None or user.id != settings.telegram_allowed_user_id:
         return
-    cmd = (update.message.text or "").lstrip("/").split()[0].lower()
     chat_id = update.effective_chat.id
-    _model[chat_id] = cmd
-    await update.message.reply_text(f"Next prompts use {cmd}.")
+    arg = (context.args[0].lower() if context.args else "")
+    if not arg:
+        current = _model.get(chat_id, "auto")
+        await update.message.reply_text(
+            f"Model: {current}\nUse /model claude|gemini|grok|auto"
+        )
+        return
+    if arg == "auto":
+        _model.pop(chat_id, None)
+        await update.message.reply_text("Model: auto routing.")
+        return
+    if arg not in ("claude", "gemini", "grok"):
+        await update.message.reply_text("Unknown model. Options: claude, gemini, grok, auto.")
+        return
+    _model[chat_id] = arg
+    await update.message.reply_text(f"Model locked: {arg}.")
 
 
 async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -131,7 +188,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history.append(("user", text))
     if answer:
         history.append(("assistant", answer))
-        await update.message.reply_text(answer)
+        await _reply(update, answer)
     elif attachments:
         history.append(("assistant", f"[Sent image: {args}]"))
     await _send_attachments(update, attachments)
@@ -153,8 +210,14 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "/wiki <topic> — Grokipedia summary via Grok\n"
         "/stocks <AAPL TSLA ...> — live stock quotes\n"
         "/tr <lang> <text> — translate\n"
-        "/claude /gemini /grok — switch AI model\n"
-        "/cost — today's API spend\n"
+        "/claude <question> — ask Claude (default)\n"
+        "/opus <question> — ask Claude Opus\n"
+        "/sonnet <question> — ask Claude Sonnet\n"
+        "/haiku <question> — ask Claude Haiku\n"
+        "/gemini <question> — ask Gemini\n"
+        "/grok <question> — ask Grok\n"
+        "/model [claude|gemini|grok|auto] — show or lock conversation model\n"
+        "/cost — today's API spend by model\n"
         "/clear — reset conversation\n"
         "/help — this list"
     )
@@ -170,9 +233,10 @@ def build_application() -> Application:
     )
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(CommandHandler("help", handle_help))
-    for model_cmd in ("claude", "gemini", "grok"):
-        app.add_handler(CommandHandler(model_cmd, handle_model_switch))
+    app.add_handler(CommandHandler("model", handle_model))
     for cmd in COMMANDS:
         app.add_handler(CommandHandler(cmd, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Unregistered /commands fall through here — answer as free text
+    app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
     return app
