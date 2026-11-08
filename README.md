@@ -2,7 +2,7 @@
 
 **A personal, single-user Telegram AI bot you self-host.** Text it questions. It replies with web search results, stock quotes, weather, PDF summaries, news, translations — all through normal Telegram messages. Runs on a Raspberry Pi at home or cheap cloud hosting.
 
-One strong use case: **reliable answers on airplane WiFi without paying for internet.** Most airlines offer free Telegram messaging — Hermes turns that into a full AI assistant.
+One strong use case: **reliable answers on airplane WiFi without paying for internet.** Many airlines offer a free inflight messaging tier — on the ones that let Telegram through, Hermes turns it into a full AI assistant.
 
 > *"I was tired of paying for inflight WiFi just to Google things. So I built an AI that answers through Telegram's free tier."*
 
@@ -16,7 +16,7 @@ One strong use case: **reliable answers on airplane WiFi without paying for inte
 - **Slash commands** — weather, stocks, news, flight status, wiki, translation
 - **Conversation memory** — 12-turn context per chat
 - **Owner-locked** — only your Telegram user ID can use it; everyone else gets rejected
-- **Tiny footprint** — runs on a Raspberry Pi, costs ~$0.02/day in API calls
+- **Tiny footprint** — runs on a Raspberry Pi, typically under $0.05/day in API calls
 
 ### Commands
 
@@ -120,8 +120,13 @@ server {
     ssl_certificate     /etc/letsencrypt/live/your-name.duckdns.org/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/your-name.duckdns.org/privkey.pem;
 
-    location / {
+    # Expose only the webhook; everything else stays private
+    location = /webhook {
         proxy_pass http://127.0.0.1:8000;
+    }
+
+    location / {
+        return 404;
     }
 }
 ```
@@ -151,7 +156,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-### Fly.io (free tier, zero maintenance)
+### Fly.io (pay-as-you-go, low maintenance)
 
 ```bash
 fly launch
@@ -185,6 +190,7 @@ hermes/
 ├── config.py         All env vars via pydantic-settings
 ├── tools/
 │   ├── fetch.py      URL → text (used by Claude tool loop)
+│   ├── netguard.py   HTTP client that refuses LAN/loopback/private addresses
 │   ├── pdf.py        PDF download + PyMuPDF text extraction + text→PDF generation
 │   ├── weather.py    wttr.in (free, no key)
 │   ├── grok.py       xAI API for /wiki
@@ -206,7 +212,7 @@ hermes/
 | [FastAPI](https://fastapi.tiangolo.com) + uvicorn | Webhook server | Free |
 | [Google Gemini](https://aistudio.google.com) | Primary AI + Google Search | Free tier |
 | [Anthropic Claude](https://console.anthropic.com) | Fallback + PDF/URL tools | Pay-per-use |
-| [xAI Grok](https://console.x.ai) | /wiki encyclopedia entries | Pay-per-use |
+| [xAI Grok](https://console.x.ai) | /wiki entries, /grok, opt-in model lock | Pay-per-use |
 | [yfinance](https://github.com/ranaroussi/yfinance) | Stock quotes | Free |
 | [wttr.in](https://wttr.in) | Weather data | Free |
 | [PyMuPDF](https://pymupdf.readthedocs.io) | PDF text extraction | Free |
@@ -216,11 +222,12 @@ hermes/
 - **Owner-only access** — locked to a single Telegram user ID. All other users are rejected immediately.
 - **Webhook secret** — every incoming POST is validated against `X-Telegram-Bot-Api-Secret-Token`. No secret, no access.
 - **No secrets in code** — everything is in `.env`, loaded via pydantic-settings.
+- **No LAN access from fetches** — URL and PDF fetches (including every redirect hop) refuse private, loopback, link-local and Tailscale addresses, so a prompt-injected page can't point the bot at your router or other home services.
 - **Agent loop cap** — `MAX_TOOL_ITERATIONS=5` prevents runaway tool calls.
 
 ## Cost
 
-Most queries hit Gemini's free tier. Claude is fallback only (~$0.01–0.03 per query). Grok is used only for `/wiki`. Typical daily cost for moderate usage: under $0.05.
+Most queries hit Gemini's free tier. Claude is fallback only (~$0.01–0.03 per query). Grok is used only for `/wiki`, `/grok`, or when you lock the conversation to it with `/model grok`. Typical daily cost for moderate usage: under $0.05.
 
 ---
 
