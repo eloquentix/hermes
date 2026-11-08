@@ -1,6 +1,7 @@
 import logging
 import httpx
 from config import settings
+from tools.netguard import public_client
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ async def search_image(query: str) -> dict | None:
         if not url:
             continue
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with public_client(timeout=10, follow_redirects=True) as client:
                 resp = await client.get(url, headers={"User-Agent": _UA})
                 resp.raise_for_status()
                 content_type = resp.headers.get("content-type", "")

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import date, datetime
@@ -23,9 +24,10 @@ _PRICING = (
     ("claude", (3.0, 15.0)),
     ("grok", (3.0, 15.0)),
 )
+WEB_SEARCH_USD = 0.01  # Claude web_search: $10 per 1,000 searches
 
 
-def _track_cost(input_tokens: int, output_tokens: int, model: str, cost_usd: float = None) -> None:
+def _track_cost(input_tokens: int, output_tokens: int, model: str, cost_usd: float = None, searches: int = 0) -> None:
     """Track spend. cost_usd overrides token math when the provider reports exact cost."""
     global _cost_today, _cost_date, _cost_calls
     today = date.today().isoformat()
@@ -43,9 +45,16 @@ def _track_cost(input_tokens: int, output_tokens: int, model: str, cost_usd: flo
         cost = (input_tokens * price_in + output_tokens * price_out) / 1_000_000
     else:
         cost = cost_usd
+    cost += searches * WEB_SEARCH_USD
     _cost_today += cost
     _cost_by_model[model] = _cost_by_model.get(model, 0.0) + cost
     _cost_calls += 1
+
+
+def _track_claude(response, model: str) -> None:
+    server_tools = getattr(response.usage, "server_tool_use", None)
+    searches = getattr(server_tools, "web_search_requests", 0) or 0
+    _track_cost(response.usage.input_tokens, response.usage.output_tokens, model, searches=searches)
 
 
 def get_daily_cost() -> str:
@@ -65,6 +74,7 @@ from tools.stocks import get_stock
 from tools.images import search_image
 from tools.flight import flight_status
 from tools.wiki import get_wiki
+from tools.netguard import public_client
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +204,7 @@ async def _run_claude(
             messages=messages,
         )
         logger.info("Claude stop_reason=%s iter=%d", response.stop_reason, iteration)
-        _track_cost(response.usage.input_tokens, response.usage.output_tokens, model)
+        _track_claude(response, model)
 
         if response.stop_reason == "end_turn":
             text = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
@@ -377,7 +387,7 @@ async def _find_image(topic: str) -> dict | None:
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": f"Find 3 direct image URLs for: {topic}"}],
         )
-        _track_cost(response.usage.input_tokens, response.usage.output_tokens, settings.claude_model)
+        _track_claude(response, settings.claude_model)
         all_text = " ".join(b.text for b in response.content if hasattr(b, "text"))
         urls = _IMAGE_URL_RE.findall(all_text)
         urls = [u for u in urls if "/thumb/" not in u] or urls
@@ -388,7 +398,7 @@ async def _find_image(topic: str) -> dict | None:
     for url in urls[:5]:
         try:
             ua = _WIKI_UA if "wikimedia" in url or "wikipedia" in url else "Mozilla/5.0"
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with public_client(timeout=10, follow_redirects=True) as client:
                 resp = await client.get(url, headers={"User-Agent": ua})
                 resp.raise_for_status()
                 ct = resp.headers.get("content-type", "")
@@ -518,7 +528,7 @@ async def cmd_stocks(args: str) -> str:
     results = []
     for ticker in tickers[:4]:  # max 4 at once
         try:
-            results.append(get_stock(ticker))
+            results.append(await asyncio.to_thread(get_stock, ticker))
         except Exception as exc:
             results.append(f"{ticker.upper()}: error ({exc})")
     return "\n".join(results)
@@ -586,7 +596,7 @@ async def _retrieve_via_model(query: str) -> str:
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}],
     )
-    _track_cost(response.usage.input_tokens, response.usage.output_tokens, settings.claude_model)
+    _track_claude(response, settings.claude_model)
     return " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
 
 
@@ -605,7 +615,7 @@ async def _retrieve_via_source(query: str) -> str:
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": query}],
     )
-    _track_cost(response.usage.input_tokens, response.usage.output_tokens, settings.claude_model)
+    _track_claude(response, settings.claude_model)
     all_text = " ".join(b.text for b in response.content if hasattr(b, "text"))
     for url in _URL_RE.findall(all_text)[:3]:
         url = url.rstrip(").,]")
@@ -632,7 +642,7 @@ async def _extract_work(page_text: str, query: str) -> str:
             ),
             messages=[{"role": "user", "content": f"Work requested: {query}\n\nPage dump:\n{page_text}"}],
         )
-        _track_cost(response.usage.input_tokens, response.usage.output_tokens, "claude-haiku-4-5")
+        _track_claude(response, "claude-haiku-4-5")
         cleaned = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
         return cleaned if len(cleaned) > 100 else page_text
     except Exception as exc:

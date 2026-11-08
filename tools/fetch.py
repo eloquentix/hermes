@@ -1,6 +1,7 @@
 import html
 import re
-import httpx
+
+from tools.netguard import public_client
 
 SCHEMA = {
     "name": "fetch_url",
@@ -26,7 +27,7 @@ _STRIP_BLOCKS_RE = re.compile(
 
 
 async def fetch_url(url: str, max_chars: int = 1500) -> str:
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+    async with public_client(timeout=15, follow_redirects=True) as client:
         resp = await client.get(url, headers=_HEADERS)
         resp.raise_for_status()
 

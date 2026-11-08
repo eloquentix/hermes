@@ -1,5 +1,6 @@
-import httpx
 import pymupdf
+
+from tools.netguard import public_client
 
 SCHEMA = {
     "name": "fetch_pdf",
@@ -21,7 +22,7 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; inflightbot/1.0)"}
 
 
 async def fetch_pdf(url: str, max_chars: int = 3000) -> str:
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with public_client(timeout=30, follow_redirects=True) as client:
         resp = await client.get(url, headers=_HEADERS)
         resp.raise_for_status()
 
@@ -41,7 +42,7 @@ async def fetch_pdf(url: str, max_chars: int = 3000) -> str:
 
 async def fetch_pdf_bytes(url: str) -> tuple[bytes, str]:
     """Download PDF and return (raw_bytes, filename)."""
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with public_client(timeout=30, follow_redirects=True) as client:
         resp = await client.get(url, headers=_HEADERS)
         resp.raise_for_status()
     filename = url.rstrip("/").rsplit("/", 1)[-1]
